@@ -47,7 +47,11 @@ jobs:
       - name: Run KubeSentinel Static Scan
         run: |
           echo "Running KubeSentinel security scan on Kubernetes manifests..."
-          kubesentinel scan --path ./k8s
+          # 1. Copy the rules from the kubesentinel repo to the pipeline's workspace
+          cp -r /home/test/kubesentinel/config ./
+          
+          # 2. Run the scan (it will now see the ./config/rules folder)
+          kubesentinel scan --path ./k8s/
         shell: bash
 
       - name: Ensure demo-app namespace exists
