@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: Build, Scan & Deploy
 
 on:
   push:
@@ -6,19 +6,116 @@ on:
       - main
 
 jobs:
-  scan-and-deploy:
-    runs-on: ubuntu-latest
+  build-scan-deploy:
+    # Use 'self-hosted' or a custom label for your Ubuntu VM runner
+    runs-on: self-hosted
     permissions:
       contents: read
+      packages: write
 
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v3
 
+      - name: Set up environment variables
+        run: |
+          echo "IMAGE_NAME=victim-app" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
+          echo "NAMESPACE=demo-app" >> $GITHUB_ENV
+          echo "DEPLOYMENT_NAME=victim-app" >> $GITHUB_ENV
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} ${{ env.IMAGE_NAME }}:latest
+        shell: bash
+
+      - name: Load image into Minikube
+        run: |
+          echo "Loading Docker image into Minikube..."
+          minikube image load ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          minikube image load ${{ env.IMAGE_NAME }}:latest
+        shell: bash
+
+      - name: Configure Minikube context
+        run: |
+          # Set the Minikube context for kubectl
+          kubectl config use-context minikube
+          echo "✓ Minikube context configured"
+        shell: bash
+
       - name: Run KubeSentinel Static Scan
-        run: kubesentinel scan --path ./k8s
+        run: |
+          echo "Running KubeSentinel security scan on Kubernetes manifests..."
+          kubesentinel scan --path ./k8s
+        shell: bash
+
+      - name: Ensure demo-app namespace exists
+        if: success()
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+        shell: bash
 
       - name: Deploy to Minikube
+        if: success()
         run: |
-          echo "Scan passed — deploying to Minikube..."
-          kubectl apply -f ./k8s/deployment.yaml
+          echo "KubeSentinel scan passed. Deploying to Minikube cluster..."
+          kubectl apply -f ./k8s/deployment.yaml -n ${{ env.NAMESPACE }}
+        shell: bash
+
+      - name: Wait for deployment rollout
+        if: success()
+        run: |
+          echo "Waiting for deployment to roll out..."
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=5m
+        shell: bash
+
+      - name: Verify pod status
+        if: success()
+        run: |
+          echo "Deployment successful. Checking pod status..."
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.DEPLOYMENT_NAME }}
+        shell: bash
+
+      - name: Post-deployment health check
+        if: success()
+        run: |
+          echo "Running post-deployment health checks..."
+          POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.DEPLOYMENT_NAME }} -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "$POD_NAME" ]; then
+            echo "❌ No pods found with label app=${{ env.DEPLOYMENT_NAME }}"
+            exit 1
+          fi
+          echo "✓ Pod name: $POD_NAME"
+          
+          # Check pod phase
+          POD_PHASE=$(kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.phase}')
+          echo "✓ Pod phase: $POD_PHASE"
+          
+          # Verify the pod is Running
+          if [ "$POD_PHASE" != "Running" ]; then
+            echo "❌ Pod is not in Running state"
+            exit 1
+          fi
+          
+          # Check the health endpoint using kubectl exec
+          echo "Checking /api/health endpoint..."
+          kubectl exec $POD_NAME -n ${{ env.NAMESPACE }} -- wget -q -O- http://localhost:3000/api/health | grep -q "ok"
+          if [ $? -eq 0 ]; then
+            echo "✓ Health check passed"
+          else
+            echo "⚠ Health check endpoint not responding (continue for demo purposes)"
+          fi
+        shell: bash
+        continue-on-error: false
+
+      - name: Workflow summary
+        if: always()
+        run: |
+          echo "=== Workflow Summary ==="
+          echo "Image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "Namespace: ${{ env.NAMESPACE }}"
+          echo "Deployment: ${{ env.DEPLOYMENT_NAME }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "========================"
+        shell: bash
