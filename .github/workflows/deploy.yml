@@ -40,6 +40,8 @@ jobs:
           
           echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
+          echo "here is the available space"
+          df -h
         shell: bash
 
       - name: Build Docker image
