@@ -47,6 +47,9 @@ jobs:
       - name: Run KubeSentinel Static Scan
         run: |
           echo "Running KubeSentinel security scan on Kubernetes manifests..."
+          cd /home/test/kubesentinel
+          git pull origin main
+          cd /home/test
           # 1. Copy the rules from the kubesentinel repo to the pipeline's workspace
           cp -r /home/test/kubesentinel/config ./
           
