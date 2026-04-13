@@ -24,8 +24,24 @@ jobs:
           echo "NAMESPACE=demo-app" >> $GITHUB_ENV
           echo "DEPLOYMENT_NAME=victim-app" >> $GITHUB_ENV
 
+      - name: Start Minikube
+        run: minikube start --memory=3000 --cpus=2
+        shell: bash
+
+      - name: Wait for Kubernetes to be ready
+        run: |
+          kubectl wait --for=condition=Ready node/minikube --timeout=90s
+          kubectl get nodes
+        shell: bash
+
+      - name: Start Minikube (Docker driver)
+        run: minikube start --driver=docker
+        shell: bash
+
       - name: Clean up previous images
         run: |
+          echo "here the storage of the vm"
+          df -h
           echo "Removing previous victim-app images and stale Minikube temp files..."
           docker image rm -f ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} || true
           docker image rm -f ${{ env.IMAGE_NAME }}:latest || true
