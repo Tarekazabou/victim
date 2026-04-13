@@ -24,31 +24,21 @@ jobs:
           echo "NAMESPACE=demo-app" >> $GITHUB_ENV
           echo "DEPLOYMENT_NAME=victim-app" >> $GITHUB_ENV
 
-      - name: Start Minikube
-        run: minikube start --memory=3000 --cpus=2
-        shell: bash
-
-      - name: Wait for Kubernetes to be ready
+      - name: Clean up and Start Minikube
         run: |
+          echo "=== 1. Freeing up Disk Space ==="
+          docker system prune -af --volumes
+          
+          echo "=== 2. Deleting old broken cluster ==="
+          minikube delete
+          
+          echo "=== 3. Starting Minikube safely ==="
+          # We drop the memory to 2200MB to leave enough RAM for the OS
+          # We use --force to bypass any lingering disk space warnings
+          minikube start --memory=2200 --cpus=2 --force
+          
+          echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
-          kubectl get nodes
-        shell: bash
-
-      - name: Start Minikube (Docker driver)
-        run: minikube start --driver=docker
-        shell: bash
-
-      - name: Clean up previous images
-        run: |
-          echo "here the storage of the vm"
-          df -h
-          echo "Removing previous victim-app images and stale Minikube temp files..."
-          docker image rm -f ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} || true
-          docker image rm -f ${{ env.IMAGE_NAME }}:latest || true
-          minikube image rm ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} || true
-          minikube image rm ${{ env.IMAGE_NAME }}:latest || true
-          rm -f /tmp/minikube_image_*.log || true
-          docker system prune -af || true
         shell: bash
 
       - name: Build Docker image
