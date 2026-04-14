@@ -140,7 +140,8 @@ jobs:
         run: |
           echo "=== Building KubeSentinel CLI Image ==="
           cd ~/kubesentinel
-          docker build -f dockerfile -t kubesentinel:latest .
+          git pull origin main
+          go build -o bin/kubesentinel ./cmd/kubesentinel/          docker build -f dockerfile -t kubesentinel:latest .
           minikube image load kubesentinel:latest
           echo "✓ KubeSentinel CLI image loaded"
           
