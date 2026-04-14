@@ -34,9 +34,9 @@ jobs:
           minikube delete
           
           echo "=== 3. Starting Minikube safely ==="
-          # We drop the memory to 2200MB to leave enough RAM for the OS
+          # We allocate 3500MB to ensure sufficient resources
           # We use --force to bypass any lingering disk space warnings
-          minikube start --memory=2200 --cpus=2 --force
+          minikube start --memory=3500 --cpus=2 --force
           
           echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
@@ -94,7 +94,7 @@ jobs:
           
           # Wait for Falco DaemonSet to be ready
           echo "=== Waiting for Falco DaemonSet ==="
-          kubectl rollout status daemonset/falco -n falco --timeout=3m
+          kubectl rollout status daemonset/falco -n falco --timeout=8m
           
           # Verify Falco pod is running
           echo "=== Verifying Falco Pod Status ==="
