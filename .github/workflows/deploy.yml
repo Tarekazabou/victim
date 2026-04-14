@@ -96,6 +96,16 @@ jobs:
           echo "=== Waiting for Falco DaemonSet ==="
           kubectl rollout status daemonset/falco -n falco --timeout=8m
           
+          # Enable JSON output with output property
+          echo "=== Enabling Falco JSON Output ==="
+          helm upgrade falco falcosecurity/falco \
+            --namespace falco \
+            --reuse-values \
+            --set falco.json_output=true \
+            --set falco.json_include_output_property=true
+          
+          echo "✓ JSON output configuration applied"
+          
           # Verify Falco pod is running
           echo "=== Verifying Falco Pod Status ==="
           kubectl get pods -n falco -l app.kubernetes.io/name=falco
@@ -124,6 +134,37 @@ jobs:
             echo "⚠️  Falco logs (first 20 lines):"
             kubectl logs -n falco $FALCO_POD --tail=20 || true
           fi
+        shell: bash
+
+      - name: Build and Deploy KubeSentinel Components
+        run: |
+          echo "=== Building KubeSentinel CLI Image ==="
+          cd ~/kubesentinel
+          docker build -f dockerfile -t kubesentinel:latest .
+          minikube image load kubesentinel:latest
+          echo "✓ KubeSentinel CLI image loaded"
+          
+          echo "=== Applying KubeSentinel DaemonSet ==="
+          kubectl apply -f deploy/kubesentinel-daemonset.yaml
+          echo "✓ KubeSentinel DaemonSet deployed"
+          
+          echo "=== Building KubeSentinel AI Image ==="
+          docker build -f dockerfile.ai -t kubesentinel-ai:latest .
+          minikube image load kubesentinel-ai:latest
+          echo "✓ KubeSentinel AI image loaded"
+          
+          echo "=== Restarting KubeSentinel AI Deployment ==="
+          kubectl rollout restart deployment kubesentinel-ai -n kubesentinel
+          kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=5m
+          echo "✓ KubeSentinel AI deployment restarted and ready"
+          
+          echo "=== Configuring Firewall ==="
+          sudo ufw allow 30500/tcp || true
+          echo "✓ Firewall rule applied"
+          
+          echo "=== Port Forwarding Configuration ==="
+          echo "To access KubeSentinel AI on the VM, run:"
+          echo "kubectl port-forward --address 0.0.0.0 svc/kubesentinel-ai 30500:5000 -n kubesentinel"
         shell: bash
 
       - name: Run KubeSentinel Static Scan
@@ -185,16 +226,8 @@ jobs:
       - name: Deploy to Minikube
         if: success()
         run: |
-          if [ "${{ env.SCAN_FAILED }}" == "true" ]; then
-            echo "⚠️  Security violations detected. Deploying secure configuration instead..."
-            DEPLOYMENT_FILE="./k8s/deployment-secure.yaml"
-          else
-            echo "✓ Deploying standard configuration..."
-            DEPLOYMENT_FILE="./k8s/deployment.yaml"
-          fi
-          
-          echo "Deploying from: $DEPLOYMENT_FILE"
-          kubectl apply -f "$DEPLOYMENT_FILE" -n ${{ env.NAMESPACE }}
+          echo "✓ Deploying standard configuration..."
+          kubectl apply -f ./k8s/deployment.yaml -n ${{ env.NAMESPACE }}
           kubectl apply -f ./k8s/service-loadbalancer.yaml -n ${{ env.NAMESPACE }}
         shell: bash
 
@@ -319,6 +352,8 @@ jobs:
           echo "  Namespace: ${{ env.NAMESPACE }}"
           echo "  Deployment: ${{ env.DEPLOYMENT_NAME }}"
           echo "  Commit: ${{ github.sha }}"
+          echo "check the status of the deployment with: kubectl get pods -A"
+          kubectl get pods -A
           echo ""
           echo "============================================================"
           echo ""
