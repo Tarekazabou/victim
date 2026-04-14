@@ -30,10 +30,15 @@ jobs:
           echo "=== 1. Freeing up Disk Space ==="
           docker system prune -af --volumes
           
-          echo "=== 2. Cleaning up victim namespace images ==="
-          docker rmi -f $(docker images | grep victim | awk '{print $3}') 2>/dev/null || true
+          echo "=== 2. Deleting old broken cluster ==="
+          minikube delete
           
-          echo "=== 3. Wait for Control Plane ==="
+          echo "=== 3. Starting Minikube safely ==="
+          # We drop the memory to 2200MB to leave enough RAM for the OS
+          # We use --force to bypass any lingering disk space warnings
+          minikube start --memory=2200 --cpus=2 --force
+          
+          echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
           echo "here is the available space"
           df -h
