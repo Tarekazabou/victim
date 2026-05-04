@@ -154,8 +154,9 @@ jobs:
 
           echo "=== Configuring Firewall ==="
           sudo ufw allow 30500/tcp || true
+          sudo ufw allow 30600/tcp || true
           sudo ufw allow 8080/tcp  || true
-          echo "✓ Firewall rules applied (30500 for AI, 8080 for metrics)"
+          echo "✓ Firewall rules applied (30500 for AI, 30600 for Victim App, 8080 for metrics)"
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
@@ -209,6 +210,16 @@ jobs:
             echo "SCAN_FAILED=false" >> $GITHUB_ENV
           fi
         shell: bash
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: python3 -m pip install -r /home/test/kubesentinel/requirements.txt || true
+      - run: python3 -m pip install -r /home/test/kubesentinel/ai-module/requirements.txt || true
+      - run: |
+          cd /home/test/kubesentinel
+          python3 cspm/cli.py --manifest deploy/ --format json || true
 
       # NEW: Python CSPM module scan (cspm/ directory, added in Phase 1.4)
       - name: Run CSPM Python Scan
@@ -440,6 +451,11 @@ jobs:
           else
             echo "✓ LoadBalancer external IP: $EXTERNAL_IP"
           fi
+
+          echo "=== Exposing Victim App on Port 30600 ==="
+          fuser -k 30600/tcp || true
+          nohup kubectl port-forward --address 0.0.0.0 svc/victim-app-lb 30600:80 -n ${{ env.NAMESPACE }} > /tmp/victim-app-pf.log 2>&1 &
+          echo "✓ Victim App port-forwarded to 30600"
         shell: bash
 
       - name: Display Access Instructions
@@ -473,7 +489,8 @@ jobs:
           echo ""
           echo "🎯 Attack Simulator:"
           echo "  1. On VM:     minikube tunnel"
-          echo "  2. Browser:   http://$VM_IP  (or http://$EXTERNAL_IP)"
+          echo "  2. Browser:   http://$VM_IP:30600"
+          echo "  (or LoadBalancer: http://$EXTERNAL_IP)"
           echo ""
           echo "📡 Falco events are forwarded automatically by Falcosidekick to:"
           echo "  http://kubesentinel-runtime.kubesentinel.svc.cluster.local:8080/events"
@@ -530,7 +547,7 @@ jobs:
             --directory ~/kubesentinel/frontend \
             > /tmp/frontend.log 2>&1 &
 
-          echo "✓ Frontend live at http://$VM_IP:3000"
+          echo "✓ Frontend live at http://$VM_IP:30500"
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
