@@ -541,7 +541,7 @@ jobs:
       # so they are accessible from the GitHub Actions run summary page.
       - name: Upload Security Reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kubesentinel-security-reports-${{ github.sha }}
           path: |
