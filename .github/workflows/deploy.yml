@@ -243,29 +243,29 @@ jobs:
           if [ -f "$REPO_WORKSPACE/reports/cspm-findings.json" ]; then
             # Print severity counts from JSON summary block
             python3 -c "
-import json, sys
-with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
-    data = json.load(f)
-summary = data.get('summary', {})
-total = summary.get('total', 0)
-print(f'Total findings : {total}')
-for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
-    count = summary.get(sev, 0)
-    if count:
-        print(f'  {sev}: {count}')
-if total == 0:
-    print('✓ No CSPM findings — manifests look clean')
-else:
-    print('⚠️  Review cspm-report.html for remediation guidance')
-" 2>/dev/null || cat "$REPO_WORKSPACE/reports/cspm-findings.json"
+          import json, sys
+          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+          data = json.load(f)
+          summary = data.get('summary', {})
+          total = summary.get('total', 0)
+          print(f'Total findings : {total}')
+          for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
+              count = summary.get(sev, 0)
+              if count:
+                  print(f'  {sev}: {count}')
+          if total == 0:
+              print('✓ No CSPM findings — manifests look clean')
+          else:
+              print('⚠️  Review cspm-report.html for remediation guidance')
+          " 2>/dev/null || cat "$REPO_WORKSPACE/reports/cspm-findings.json"
 
-            # Set env flag if CRITICAL findings exist
-            CRITICAL_COUNT=$(python3 -c "
-import json
-with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
-    data = json.load(f)
-print(data.get('summary', {}).get('CRITICAL', 0))
-" 2>/dev/null || echo "0")
+                      # Set env flag if CRITICAL findings exist
+                      CRITICAL_COUNT=$(python3 -c "
+          import json
+          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+              data = json.load(f)
+          print(data.get('summary', {}).get('CRITICAL', 0))
+          " 2>/dev/null || echo "0")
 
             echo "CSPM_CRITICAL=$CRITICAL_COUNT" >> $GITHUB_ENV
 
@@ -511,6 +511,26 @@ print(data.get('summary', {}).get('CRITICAL', 0))
           kubectl get pods -A
           echo ""
           echo "============================================================"
+        shell: bash
+
+      - name: Serve Frontend
+        if: success()
+        run: |
+          VM_IP=$(hostname -I | awk '{print $1}')
+
+          echo "=== Patching API URLs in compiled frontend ==="
+          find ~/kubesentinel/frontend -name "*.js" -exec \
+            sed -i "s|http://localhost:5000|http://$VM_IP:5000|g" {} \;
+          find ~/kubesentinel/frontend -name "*.js" -exec \
+            sed -i "s|http://localhost:8080|http://$VM_IP:8080|g" {} \;
+
+          echo "=== Starting frontend server ==="
+          fuser -k 3000/tcp || true
+          nohup python3 -m http.server 3000 --bind 0.0.0.0 \
+            --directory ~/kubesentinel/frontend \
+            > /tmp/frontend.log 2>&1 &
+
+          echo "✓ Frontend live at http://$VM_IP:3000"
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
