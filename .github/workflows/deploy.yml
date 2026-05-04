@@ -7,7 +7,6 @@ on:
 
 jobs:
   build-scan-deploy:
-    # Use 'self-hosted' or a custom label for your Ubuntu VM runner
     runs-on: self-hosted
     permissions:
       contents: read
@@ -15,7 +14,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up environment variables
         run: |
@@ -23,27 +22,34 @@ jobs:
           echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
           echo "NAMESPACE=demo-app" >> $GITHUB_ENV
           echo "DEPLOYMENT_NAME=victim-app" >> $GITHUB_ENV
+          # Report window: last 24h, formatted for kubesentinel report --from/--to
+          echo "REPORT_FROM=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+          echo "REPORT_TO=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
         shell: bash
 
+      # ──────────────────────────────────────────────────────────────────────
+      # 1. CLUSTER SETUP
+      # ──────────────────────────────────────────────────────────────────────
       - name: Clean up and Start Minikube
         run: |
           echo "=== 1. Freeing up Disk Space ==="
           docker system prune -af --volumes
-          
+
           echo "=== 2. Deleting old broken cluster ==="
           minikube delete
-          
+
           echo "=== 3. Starting Minikube safely ==="
-          # We allocate 3500MB to ensure sufficient resources
-          # We use --force to bypass any lingering disk space warnings
           minikube start --memory=3500 --cpus=2 --force
-          
+
           echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
-          echo "here is the available space"
+          echo "Available space:"
           df -h
         shell: bash
 
+      # ──────────────────────────────────────────────────────────────────────
+      # 2. BUILD VICTIM APP
+      # ──────────────────────────────────────────────────────────────────────
       - name: Build Docker image
         run: |
           docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
@@ -52,67 +58,51 @@ jobs:
 
       - name: Load image into Minikube
         run: |
-          echo "Loading Docker image into Minikube..."
           minikube image load ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           minikube image load ${{ env.IMAGE_NAME }}:latest
         shell: bash
 
       - name: Configure Minikube context
         run: |
-          # Set the Minikube context for kubectl
           kubectl config use-context minikube
           echo "✓ Minikube context configured"
         shell: bash
 
+      # ──────────────────────────────────────────────────────────────────────
+      # 3. INSTALL FALCO (with Falcosidekick → KubeSentinel runtime webhook)
+      # ──────────────────────────────────────────────────────────────────────
       - name: Install and Configure Falco
         run: |
           echo "=== Installing Falco via Helm ==="
-          
-          # Add Falco Helm repo
           helm repo add falcosecurity https://falcosecurity.github.io/charts
           helm repo update
-          
-          # Create Falco namespace
+
           kubectl create namespace falco --dry-run=client -o yaml | kubectl apply -f -
-          
-          # Install/Upgrade Falco with Falcosidekick integration
-          # Key flags:
-          #   - ebpf.enabled=true: Use eBPF probe instead of kernel module
-          #   - falco.json_output=true: Output JSON format
-          #   - falcosidekick.enabled=true: Enable Falcosidekick for event forwarding
-          #   - falcosidekick.webhooks.kubesentinel: Send events to KubeSentinel runtime
+
+          # Falcosidekick is configured to push events directly to the
+          # kubesentinel-runtime HTTP endpoint (new in this KubeSentinel version).
+          # This replaces the manual: kubectl logs | kubesentinel monitor-stdin
           helm upgrade --install falco falcosecurity/falco \
             --namespace falco \
             --set ebpf.enabled=true \
             --set falco.json_output=true \
+            --set falco.json_include_output_property=true \
             --set falcosidekick.enabled=true \
-            --set falcosidekick.webhooks.kubesentinel="http://kubesentinel-runtime.kubesentinel.svc.cluster.local:8080/events" \
+            --set falcosidekick.config.webhook.address="http://kubesentinel-runtime.kubesentinel.svc.cluster.local:8080/events" \
             --wait \
             --timeout=5m
-          
+
           echo "✓ Falco Helm install completed"
-          
-          # Wait for Falco DaemonSet to be ready
+
           echo "=== Waiting for Falco DaemonSet ==="
           kubectl rollout status daemonset/falco -n falco --timeout=8m
-          
-          # Enable JSON output with output property
-          echo "=== Enabling Falco JSON Output ==="
-          helm upgrade falco falcosecurity/falco \
-            --namespace falco \
-            --reuse-values \
-            --set falco.json_output=true \
-            --set falco.json_include_output_property=true
-          
-          echo "✓ JSON output configuration applied"
-          
-          # Verify Falco pod is running
+
           echo "=== Verifying Falco Pod Status ==="
           kubectl get pods -n falco -l app.kubernetes.io/name=falco
-          
-          # Get Falco pod name and verify it's outputting JSON.
-          # Falco Helm chart uses app.kubernetes.io/* labels instead of app=falco.
-          FALCO_POD=$(kubectl get pod -n falco -l app.kubernetes.io/name=falco,app.kubernetes.io/instance=falco -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          FALCO_POD=$(kubectl get pod -n falco \
+            -l app.kubernetes.io/name=falco,app.kubernetes.io/instance=falco \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
           if [ -z "$FALCO_POD" ]; then
             echo "❌ No Falco pod found after DaemonSet rollout"
@@ -122,20 +112,20 @@ jobs:
           fi
 
           echo "Falco pod: $FALCO_POD"
-          
-          # Give Falco a moment to start generating events
           sleep 5
-          
-          # Check for JSON output in logs
+
           echo "=== Checking Falco JSON Output ==="
-          if kubectl logs -n falco $FALCO_POD --tail=10 | grep -q '"time"'; then
-            echo "✓ Falco is outputting JSON events successfully"
+          if kubectl logs -n falco "$FALCO_POD" --tail=10 | grep -q '"time"'; then
+            echo "✓ Falco is outputting JSON events"
           else
             echo "⚠️  Falco logs (first 20 lines):"
-            kubectl logs -n falco $FALCO_POD --tail=20 || true
+            kubectl logs -n falco "$FALCO_POD" --tail=20 || true
           fi
         shell: bash
 
+      # ──────────────────────────────────────────────────────────────────────
+      # 4. BUILD & DEPLOY KUBESENTINEL
+      # ──────────────────────────────────────────────────────────────────────
       - name: Build and Deploy KubeSentinel Components
         run: |
           echo "=== Building KubeSentinel CLI Image ==="
@@ -145,80 +135,151 @@ jobs:
           docker build -f dockerfile -t kubesentinel:latest .
           minikube image load kubesentinel:latest
           echo "✓ KubeSentinel CLI image loaded"
-          
+
           echo "=== Applying KubeSentinel DaemonSet ==="
+          # The DaemonSet already includes --metrics-port=8080 in its args,
+          # which exposes the Prometheus /metrics and /health endpoints.
           kubectl apply -f deploy/kubesentinel-daemonset.yaml
           echo "✓ KubeSentinel DaemonSet deployed"
-          
+
           echo "=== Building KubeSentinel AI Image ==="
           docker build -f dockerfile.ai -t kubesentinel-ai:latest .
           minikube image load kubesentinel-ai:latest
           echo "✓ KubeSentinel AI image loaded"
-          
+
           echo "=== Restarting KubeSentinel AI Deployment ==="
           kubectl rollout restart deployment kubesentinel-ai -n kubesentinel
           kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=5m
-          echo "✓ KubeSentinel AI deployment restarted and ready"
-          
+          echo "✓ KubeSentinel AI deployment ready"
+
           echo "=== Configuring Firewall ==="
           sudo ufw allow 30500/tcp || true
-          echo "✓ Firewall rule applied"
-          
-          echo "=== Port Forwarding Configuration ==="
-          echo "To access KubeSentinel AI on the VM, run:"
-          echo "kubectl port-forward --address 0.0.0.0 svc/kubesentinel-ai 30500:5000 -n kubesentinel"
+          sudo ufw allow 8080/tcp  || true
+          echo "✓ Firewall rules applied (30500 for AI, 8080 for metrics)"
         shell: bash
 
-      - name: Run KubeSentinel Static Scan
+      # ──────────────────────────────────────────────────────────────────────
+      # 5. STATIC SECURITY SCANS (Go CLI + Python CSPM)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Run KubeSentinel Static Scan (Go CLI)
         run: |
-          echo "Running KubeSentinel security scan on Kubernetes manifests..."
+          echo "=== Running KubeSentinel Go static scan on k8s manifests ==="
           REPO_WORKSPACE="$GITHUB_WORKSPACE"
 
-          # Refresh KubeSentinel rules from the VM clone
           cd /home/test/kubesentinel
           git pull origin main
 
-          # Return to the checked-out victim repository workspace
           cd "$REPO_WORKSPACE"
 
-          # 1. Copy the rules from the kubesentinel repo to the pipeline's workspace
+          # Copy rules from the kubesentinel repo
           cp -r /home/test/kubesentinel/config ./
-          
-          # 2. Run the scan and capture output; handle malformed external rule files gracefully
+
+          # Create reports directory for all scan outputs
+          mkdir -p reports
+
           set +e
           SCAN_OUTPUT=$(kubesentinel scan --path ./k8s/ 2>&1)
           SCAN_EXIT=$?
           set -e
 
-          echo "$SCAN_OUTPUT" | tee scan_output.json
+          echo "$SCAN_OUTPUT" | tee reports/static-scan.json
 
           if [ $SCAN_EXIT -ne 0 ]; then
             if echo "$SCAN_OUTPUT" | grep -q "invalid yaml in config/rules/build-in-rules.yaml"; then
-              echo "Warning: malformed rule file detected (build-in-rules.yaml). Retrying without it..."
+              echo "⚠️  Malformed rule file detected. Retrying without it..."
               rm -f ./config/rules/build-in-rules.yaml
               set +e
               SCAN_OUTPUT=$(kubesentinel scan --path ./k8s/ 2>&1)
               SCAN_EXIT=$?
               set -e
-              echo "$SCAN_OUTPUT" | tee scan_output.json
+              echo "$SCAN_OUTPUT" | tee reports/static-scan.json
             elif echo "$SCAN_OUTPUT" | grep -q "Scan completed with violations found"; then
-              echo "KubeSentinel completed with policy violations. Falling back to secure deployment."
+              echo "⚠️  KubeSentinel found policy violations. Will deploy anyway for demo purposes."
             else
-              echo "Error: KubeSentinel scan could not run"
+              echo "❌ KubeSentinel scan could not run"
               exit 1
             fi
           fi
-          
-          # 3. Check if any violations were found and set variable
-          if grep -q '"passed": false' scan_output.json; then
-            echo "KubeSentinel scan found violations in deployment.yaml"
+
+          if grep -q '"passed": false' reports/static-scan.json; then
+            echo "⚠️  KubeSentinel scan found violations in k8s manifests"
             echo "SCAN_FAILED=true" >> $GITHUB_ENV
           else
-            echo "KubeSentinel scan passed - no violations found"
+            echo "✓ KubeSentinel static scan passed — no violations"
             echo "SCAN_FAILED=false" >> $GITHUB_ENV
           fi
         shell: bash
 
+      # NEW: Python CSPM module scan (cspm/ directory, added in Phase 1.4)
+      - name: Run CSPM Python Scan
+        run: |
+          echo "=== Running KubeSentinel CSPM Python module ==="
+          REPO_WORKSPACE="$GITHUB_WORKSPACE"
+          KUBESENTINEL_DIR=/home/test/kubesentinel
+
+          # Install CSPM dependency (pyyaml only, lightweight)
+          pip install pyyaml --break-system-packages -q 2>/dev/null || \
+          pip install pyyaml -q 2>/dev/null || true
+
+          cd "$KUBESENTINEL_DIR"
+
+          # JSON findings — machine-readable, used for violation check below
+          set +e
+          python -m cspm.cli \
+            --manifest "$REPO_WORKSPACE/k8s/" \
+            --format json \
+            --output "$REPO_WORKSPACE/reports/cspm-findings.json" \
+            --summary
+          CSPM_EXIT=$?
+          set -e
+
+          # HTML report — visual dashboard uploaded as artifact
+          python -m cspm.cli \
+            --manifest "$REPO_WORKSPACE/k8s/" \
+            --format html \
+            --output "$REPO_WORKSPACE/reports/cspm-report.html" || true
+
+          echo "=== CSPM Scan Summary ==="
+          if [ -f "$REPO_WORKSPACE/reports/cspm-findings.json" ]; then
+            # Print severity counts from JSON summary block
+            python3 -c "
+          import json, sys
+          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+          data = json.load(f)
+          summary = data.get('summary', {})
+          total = summary.get('total', 0)
+          print(f'Total findings : {total}')
+          for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
+              count = summary.get(sev, 0)
+              if count:
+                  print(f'  {sev}: {count}')
+          if total == 0:
+              print('✓ No CSPM findings — manifests look clean')
+          else:
+              print('⚠️  Review cspm-report.html for remediation guidance')
+          " 2>/dev/null || cat "$REPO_WORKSPACE/reports/cspm-findings.json"
+
+                      # Set env flag if CRITICAL findings exist
+                      CRITICAL_COUNT=$(python3 -c "
+          import json
+          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+              data = json.load(f)
+          print(data.get('summary', {}).get('CRITICAL', 0))
+          " 2>/dev/null || echo "0")
+
+            echo "CSPM_CRITICAL=$CRITICAL_COUNT" >> $GITHUB_ENV
+
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "⚠️  CSPM found $CRITICAL_COUNT CRITICAL misconfiguration(s) — review before production"
+            fi
+          else
+            echo "⚠️  CSPM output file not found (check cspm module installation)"
+          fi
+        shell: bash
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 6. DEPLOY VICTIM APP
+      # ──────────────────────────────────────────────────────────────────────
       - name: Ensure demo-app namespace exists
         if: success()
         run: |
@@ -228,7 +289,7 @@ jobs:
       - name: Deploy to Minikube
         if: success()
         run: |
-          echo "✓ Deploying standard configuration..."
+          echo "✓ Deploying victim-app..."
           kubectl apply -f ./k8s/deployment.yaml -n ${{ env.NAMESPACE }}
           kubectl apply -f ./k8s/service-loadbalancer.yaml -n ${{ env.NAMESPACE }}
         shell: bash
@@ -236,46 +297,48 @@ jobs:
       - name: Wait for deployment rollout
         if: success()
         run: |
-          echo "Waiting for deployment to roll out..."
           kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=5m
         shell: bash
 
       - name: Verify pod status
         if: success()
         run: |
-          echo "Deployment successful. Checking pod status..."
           kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.DEPLOYMENT_NAME }}
         shell: bash
 
       - name: Post-deployment health check
         if: success()
         run: |
-          echo "Running post-deployment health checks..."
-          kubectl wait --for=condition=ready pod -l app=${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }} --timeout=90s
+          echo "=== Running post-deployment health checks ==="
+          kubectl wait --for=condition=ready pod \
+            -l app=${{ env.DEPLOYMENT_NAME }} \
+            -n ${{ env.NAMESPACE }} --timeout=90s
 
-          POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.DEPLOYMENT_NAME }} -o jsonpath='{.items[0].metadata.name}')
+          POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+            -l app=${{ env.DEPLOYMENT_NAME }} \
+            -o jsonpath='{.items[0].metadata.name}')
+
           if [ -z "$POD_NAME" ]; then
             echo "❌ No pods found with label app=${{ env.DEPLOYMENT_NAME }}"
             exit 1
           fi
-          echo "✓ Pod name: $POD_NAME"
-          
-          # Check pod phase
-          POD_PHASE=$(kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.phase}')
-          echo "✓ Pod phase: $POD_PHASE"
-          
-          # Verify the pod is Running
+          echo "✓ Pod: $POD_NAME"
+
+          POD_PHASE=$(kubectl get pod "$POD_NAME" -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.status.phase}')
+          echo "✓ Phase: $POD_PHASE"
+
           if [ "$POD_PHASE" != "Running" ]; then
             echo "❌ Pod is not in Running state"
             exit 1
           fi
 
-          # Check the health endpoint using Node (available in the app container) with retries
-          echo "Checking /api/health endpoint..."
+          echo "=== Checking /api/health endpoint ==="
           HEALTH_OK=false
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          for i in $(seq 1 10); do
             echo "Health check attempt $i/10"
-            if kubectl exec $POD_NAME -n ${{ env.NAMESPACE }} -- node -e "const http=require('http');const req=http.get('http://localhost:3000/api/health',res=>{process.exit(res.statusCode===200?0:1)});req.on('error',()=>process.exit(1));"; then
+            if kubectl exec "$POD_NAME" -n ${{ env.NAMESPACE }} -- \
+              node -e "const http=require('http');const req=http.get('http://localhost:3000/api/health',res=>{process.exit(res.statusCode===200?0:1)});req.on('error',()=>process.exit(1));"; then
               HEALTH_OK=true
               break
             fi
@@ -283,42 +346,115 @@ jobs:
           done
 
           if [ "$HEALTH_OK" != "true" ]; then
-            echo "❌ Health check failed after retries. Recent pod logs:"
-            kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} --tail=40 || true
+            echo "❌ Health check failed after retries:"
+            kubectl logs "$POD_NAME" -n ${{ env.NAMESPACE }} --tail=40 || true
             exit 1
           fi
-
           echo "✓ Health check passed"
         shell: bash
         continue-on-error: false
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 7. KUBESENTINEL POST-DEPLOY CHECKS (new features)
+      # ──────────────────────────────────────────────────────────────────────
+
+      # NEW: verify the Prometheus /health and /metrics endpoints
+      # that the DaemonSet exposes on port 8080 (--metrics-port=8080)
+      - name: Verify KubeSentinel Metrics Endpoint
+        if: success()
+        run: |
+          echo "=== Verifying KubeSentinel Prometheus metrics endpoint ==="
+
+          KSNODE_POD=$(kubectl get pod -n kubesentinel \
+            -l app=kubesentinel \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          if [ -z "$KSNODE_POD" ]; then
+            echo "⚠️  No kubesentinel DaemonSet pod found — skipping metrics check"
+          else
+            echo "KubeSentinel pod: $KSNODE_POD"
+
+            # Health check
+            if kubectl exec "$KSNODE_POD" -n kubesentinel -- \
+              curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "✓ /health endpoint is UP"
+            else
+              echo "⚠️  /health endpoint not responding yet (monitor may still be warming up)"
+            fi
+
+            # Sample key metrics
+            echo "=== Sampled Prometheus metrics ==="
+            kubectl exec "$KSNODE_POD" -n kubesentinel -- \
+              curl -sf http://localhost:8080/metrics 2>/dev/null \
+              | grep -E '^kubesentinel_(falco_events_total|anomalies_detected_total|scan_duration)' \
+              || echo "⚠️  Metrics not yet populated (no events received)"
+          fi
+        shell: bash
+
+      # NEW: generate a forensic report using the new `kubesentinel report` command
+      # Covers the current pipeline run window (last 24h via REPORT_FROM/REPORT_TO).
+      # Outputs markdown + JSON + HTML to reports/ for artifact upload below.
+      - name: Generate KubeSentinel Forensic Report
+        if: success()
+        run: |
+          echo "=== Generating KubeSentinel forensic report ==="
+          mkdir -p reports
+
+          cd /home/test/kubesentinel
+
+          set +e
+          kubesentinel report \
+            --from "${{ env.REPORT_FROM }}" \
+            --to   "${{ env.REPORT_TO }}" \
+            --format markdown,json,html \
+            --no-llm \
+            2>&1 | tee /tmp/ks-report.log
+          REPORT_EXIT=$?
+          set -e
+
+          # Copy generated reports to workspace reports/ directory
+          if ls /home/test/kubesentinel/reports/*.{md,json,html} 2>/dev/null | head -1 | grep -q .; then
+            cp /home/test/kubesentinel/reports/*.md   $GITHUB_WORKSPACE/reports/ 2>/dev/null || true
+            cp /home/test/kubesentinel/reports/*.json $GITHUB_WORKSPACE/reports/forensics-report.json 2>/dev/null || true
+            cp /home/test/kubesentinel/reports/*.html $GITHUB_WORKSPACE/reports/forensics-report.html 2>/dev/null || true
+            echo "✓ Forensic report generated and copied to reports/"
+          else
+            echo "ℹ️  No forensic records in the report window yet"
+            echo "    (This is expected on the first run — incidents accumulate over time)"
+            cat /tmp/ks-report.log || true
+          fi
+        shell: bash
 
       - name: Verify LoadBalancer Service
         if: success()
         run: |
           echo "=== Checking LoadBalancer Service ==="
           kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb
-          
-          # Get the external IP
-          EXTERNAL_IP=$(kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          
+
+          EXTERNAL_IP=$(kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+
           if [ -z "$EXTERNAL_IP" ]; then
-            echo "⚠️  LoadBalancer external IP not yet assigned. Note: You need to run 'minikube tunnel' on the VM to expose it."
-            echo "    On your VM, run: minikube tunnel"
-            echo "    Then check: kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb"
+            echo "⚠️  LoadBalancer external IP not yet assigned."
+            echo "    Run 'minikube tunnel' on the VM to expose it."
           else
             echo "✓ LoadBalancer external IP: $EXTERNAL_IP"
-            echo "Access victim app from tablet at: http://$EXTERNAL_IP"
           fi
         shell: bash
 
       - name: Display Access Instructions
         if: success()
         run: |
-          # Capture real VM values
           VM_IP=$(hostname -I | awk '{print $1}')
           VM_HOSTNAME=$(hostname)
-          FALCO_POD=$(kubectl get pod -n falco -l app.kubernetes.io/name=falco,app.kubernetes.io/instance=falco -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "falco-pod")
-          EXTERNAL_IP=$(kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "PENDING")
+          FALCO_POD=$(kubectl get pod -n falco \
+            -l app.kubernetes.io/name=falco,app.kubernetes.io/instance=falco \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "falco-pod")
+          EXTERNAL_IP=$(kubectl get svc -n ${{ env.NAMESPACE }} victim-app-lb \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "PENDING")
+          KS_POD=$(kubectl get pod -n kubesentinel \
+            -l app=kubesentinel \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "kubesentinel-pod")
 
           echo ""
           echo "============================================================"
@@ -326,48 +462,106 @@ jobs:
           echo "============================================================"
           echo ""
           echo "📍 VM Details:"
-          echo "  Hostname: $VM_HOSTNAME"
-          echo "  Network IP: $VM_IP"
+          echo "  Hostname : $VM_HOSTNAME"
+          echo "  Network  : $VM_IP"
           echo ""
           echo "☸️  Stack Components:"
-          echo "  ✓ KubeSentinel: Running in 'kubesentinel' namespace"
-          echo "  ✓ Falco: Running in 'falco' namespace (eBPF + JSON output)"
-          echo "  ✓ Victim App: Running in '${{ env.NAMESPACE }}' namespace"
+          echo "  ✓ KubeSentinel Runtime : kubesentinel namespace"
+          echo "  ✓ KubeSentinel AI      : kubesentinel namespace (port 5000)"
+          echo "  ✓ Falco                : falco namespace (eBPF + JSON + Falcosidekick)"
+          echo "  ✓ Victim App           : ${{ env.NAMESPACE }} namespace"
           echo ""
-          echo "🎯 Access the Attack Simulator:"
-          echo "  1. On your Ubuntu VM, open a terminal and run:"
-          echo "     minikube tunnel"
-          echo "  2. On your tablet, open browser and navigate to:"
-          echo "     http://$VM_IP"
+          echo "🎯 Attack Simulator:"
+          echo "  1. On VM:     minikube tunnel"
+          echo "  2. Browser:   http://$VM_IP  (or http://$EXTERNAL_IP)"
           echo ""
-          echo "     OR (if LoadBalancer IP assigned):"
-          echo "     http://$EXTERNAL_IP"
+          echo "📡 Falco events are forwarded automatically by Falcosidekick to:"
+          echo "  http://kubesentinel-runtime.kubesentinel.svc.cluster.local:8080/events"
+          echo "  (no manual log piping needed)"
           echo ""
-          echo "📡 Monitor Falco Events (on VM, new terminal):"
-          echo "  kubectl logs -f -n falco $FALCO_POD"
+          echo "  Optional manual pipe (debug only):"
+          echo "  kubectl logs -f -n falco $FALCO_POD \\"
+          echo "    | grep --line-buffered '^{' \\"
+          echo "    | ./bin/kubesentinel monitor-stdin --config=config.yaml --warmup-minutes=0"
           echo ""
-          echo "🔬 Stream Falco to KubeSentinel Monitor (on VM, new terminal):"
-          echo "  kubectl logs -f -n falco $FALCO_POD | kubesentinel monitor-stdin"
+          echo "📊 KubeSentinel Prometheus Metrics:"
+          echo "  kubectl exec -n kubesentinel $KS_POD -- curl http://localhost:8080/metrics"
+          echo "  kubectl exec -n kubesentinel $KS_POD -- curl http://localhost:8080/health"
           echo ""
-          echo "📊 Pipeline Summary:"
-          echo "  Image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          echo "  Namespace: ${{ env.NAMESPACE }}"
-          echo "  Deployment: ${{ env.DEPLOYMENT_NAME }}"
-          echo "  Commit: ${{ github.sha }}"
-          echo "check the status of the deployment with: kubectl get pods -A"
+          echo "🔬 AI Service Port Forward:"
+          echo "  kubectl port-forward --address 0.0.0.0 svc/kubesentinel-ai 30500:5000 -n kubesentinel"
+          echo ""
+          echo "📝 Reports generated this run:"
+          echo "  reports/static-scan.json      — Go CLI static scan"
+          echo "  reports/cspm-findings.json    — Python CSPM findings"
+          echo "  reports/cspm-report.html      — CSPM visual dashboard"
+          echo "  reports/forensics-report.html — Forensic investigation report"
+          echo "  reports/forensics-report.json — Forensic report (JSON)"
+          echo ""
+          echo "  CSPM CRITICAL findings : ${{ env.CSPM_CRITICAL }}"
+          echo "  Go static scan passed  : ${{ env.SCAN_FAILED == 'false' && 'YES' || 'NO (violations found)' }}"
+          echo ""
+          echo "📋 Pipeline Summary:"
+          echo "  Image      : ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "  Namespace  : ${{ env.NAMESPACE }}"
+          echo "  Deployment : ${{ env.DEPLOYMENT_NAME }}"
+          echo "  Commit     : ${{ github.sha }}"
+          echo ""
+          echo "=== All Pod Status ==="
           kubectl get pods -A
           echo ""
           echo "============================================================"
-          echo ""
         shell: bash
+
+      - name: Serve Frontend
+        if: success()
+        run: |
+          VM_IP=$(hostname -I | awk '{print $1}')
+
+          echo "=== Patching API URLs in compiled frontend ==="
+          find ~/kubesentinel/frontend -name "*.js" -exec \
+            sed -i "s|http://localhost:5000|http://$VM_IP:5000|g" {} \;
+          find ~/kubesentinel/frontend -name "*.js" -exec \
+            sed -i "s|http://localhost:8080|http://$VM_IP:8080|g" {} \;
+
+          echo "=== Starting frontend server ==="
+          fuser -k 3000/tcp || true
+          nohup python3 -m http.server 3000 --bind 0.0.0.0 \
+            --directory ~/kubesentinel/frontend \
+            > /tmp/frontend.log 2>&1 &
+
+          echo "✓ Frontend live at http://$VM_IP:3000"
+        shell: bash
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 8. UPLOAD SECURITY REPORTS AS ARTIFACTS
+      # ──────────────────────────────────────────────────────────────────────
+
+      # NEW: upload all generated reports (CSPM HTML, forensics, static scan)
+      # so they are accessible from the GitHub Actions run summary page.
+      - name: Upload Security Reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kubesentinel-security-reports-${{ github.sha }}
+          path: |
+            reports/static-scan.json
+            reports/cspm-findings.json
+            reports/cspm-report.html
+            reports/forensics-report.html
+            reports/forensics-report.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Workflow summary
         if: always()
         run: |
           echo "=== Workflow Summary ==="
-          echo "Image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          echo "Namespace: ${{ env.NAMESPACE }}"
-          echo "Deployment: ${{ env.DEPLOYMENT_NAME }}"
-          echo "Commit: ${{ github.sha }}"
+          echo "Image           : ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "Namespace       : ${{ env.NAMESPACE }}"
+          echo "Deployment      : ${{ env.DEPLOYMENT_NAME }}"
+          echo "Commit          : ${{ github.sha }}"
+          echo "Static scan     : SCAN_FAILED=${{ env.SCAN_FAILED }}"
+          echo "CSPM CRITICAL   : ${{ env.CSPM_CRITICAL }}"
           echo "========================"
         shell: bash
