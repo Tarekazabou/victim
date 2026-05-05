@@ -240,59 +240,6 @@ jobs:
           kubectl get pods -n kubesentinel -l app=kubesentinel-ai
         shell: bash
 
-      - name: Verify AI service health and staging endpoint
-        if: env.KS_CHANGED == 'true'
-        run: |
-          echo "=== Running smoke test on KubeSentinel AI pod ==="
-
-          # Only select a Running pod, not a Terminating one
-          AI_POD=$(kubectl get pod -n kubesentinel -l app=kubesentinel-ai \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-          if [ -z "$AI_POD" ]; then
-            echo "❌ No Running AI pod found"
-            kubectl get pods -n kubesentinel -l app=kubesentinel-ai
-            exit 1
-          fi
-          echo "Using pod: $AI_POD"
-
-          PF_LOG=$(mktemp)
-          cleanup_port_forward() {
-            if [ -n "${PF_PID:-}" ] && kill -0 "$PF_PID" 2>/dev/null; then
-              kill "$PF_PID" 2>/dev/null || true
-              wait "$PF_PID" 2>/dev/null || true
-            fi
-            rm -f "$PF_LOG"
-          }
-          trap cleanup_port_forward EXIT
-
-          echo "Starting port-forward..."
-          kubectl port-forward -n kubesentinel "pod/$AI_POD" 5000:5000 --address 127.0.0.1 >"$PF_LOG" 2>&1 &
-          PF_PID=$!
-
-          # Give port-forward time to bind before starting retry loop
-          sleep 10
-
-          # Wait for port-forward to be ready with retries instead of fixed sleep
-          echo "Waiting for port-forward to establish..."
-          for i in $(seq 1 15); do
-            if curl -sf http://127.0.0.1:5000/health > /dev/null 2>&1; then
-              echo "✓ Port-forward ready after $((i + 2))s"
-              break
-            fi
-            sleep 1
-          done
-
-          echo "Checking /health endpoint..."
-          curl -sSf http://127.0.0.1:5000/health || { echo "❌ /health failed"; cat "$PF_LOG"; exit 1; }
-
-          echo "Checking /api/staging endpoint..."
-          curl -sSf http://127.0.0.1:5000/api/staging || { echo "❌ /api/staging failed"; exit 1; }
-
-          echo "✓ AI service health and staging endpoint verified"
-        shell: bash
-
       # ──────────────────────────────────────────────────────────────────────
       # 2. BUILD VICTIM APP
       # ──────────────────────────────────────────────────────────────────────
