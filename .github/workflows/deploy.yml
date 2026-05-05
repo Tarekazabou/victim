@@ -146,7 +146,31 @@ jobs:
           docker build -f dockerfile.ai -t kubesentinel-ai:latest .
           minikube image load kubesentinel-ai:latest
           echo "✓ KubeSentinel AI image loaded"
+        shell: bash
 
+      - name: Inject secrets into KubeSentinel AI deployment
+        run: |
+          kubectl create secret generic kubesentinel-ai-secrets \
+            --from-literal=GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+            --from-literal=TRAINING_API_TOKEN="${{ secrets.TRAINING_API_TOKEN }}" \
+            -n kubesentinel \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl set env deployment/kubesentinel-ai \
+            ENRICH_WITH_GEMINI=true \
+            GEMINI_RATE_LIMIT_PER_MINUTE=25 \
+            STAGING_DB_PATH=/app/staging.db \
+            TRIAGE_POLL_INTERVAL=30 \
+            TRIAGE_BATCH_SIZE=10 \
+            -n kubesentinel
+
+          kubectl set env deployment/kubesentinel-ai \
+            --from=secret/kubesentinel-ai-secrets \
+            -n kubesentinel
+        shell: bash
+
+      - name: Restart KubeSentinel AI Deployment
+        run: |
           echo "=== Restarting KubeSentinel AI Deployment ==="
           kubectl rollout restart deployment kubesentinel-ai -n kubesentinel
           kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=5m
@@ -156,6 +180,24 @@ jobs:
           sudo ufw allow 30500/tcp || true
           sudo ufw allow 8080/tcp  || true
           echo "✓ Firewall rules applied (30500 for AI, 8080 for metrics)"
+        shell: bash
+
+      - name: Verify AI service health and staging endpoint
+        run: |
+          echo "=== Running smoke test on KubeSentinel AI pod ==="
+          AI_POD=$(kubectl get pod -n kubesentinel -l app=kubesentinel-ai -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "$AI_POD" ]; then
+            echo "❌ No AI pod found"
+            exit 1
+          fi
+
+          echo "Checking /health endpoint..."
+          kubectl exec "$AI_POD" -n kubesentinel -- curl -sSf http://localhost:5000/health || { echo "❌ /health failed"; exit 1; }
+
+          echo "Checking /api/staging endpoint..."
+          kubectl exec "$AI_POD" -n kubesentinel -- curl -sSf http://localhost:5000/api/staging || { echo "❌ /api/staging failed"; exit 1; }
+          
+          echo "✓ AI service health and staging endpoint verified"
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
