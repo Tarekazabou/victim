@@ -16,6 +16,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Detect KubeSentinel changes
+        run: |
+          echo "=== Detecting KubeSentinel changes ==="
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          echo "$CHANGED_FILES"
+          if echo "$CHANGED_FILES" | grep -E -q '(^dockerfile$|^dockerfile\.ai$|^deploy/|^cspm/|\.go$)'; then
+            echo "KS_CHANGED=true" >> $GITHUB_ENV
+          else
+            echo "KS_CHANGED=false" >> $GITHUB_ENV
+          fi
+        shell: bash
+
       - name: Set up environment variables
         run: |
           echo "IMAGE_NAME=victim-app" >> $GITHUB_ENV
@@ -31,6 +43,7 @@ jobs:
       # 1. CLUSTER SETUP
       # ──────────────────────────────────────────────────────────────────────
       - name: Clean up and Start Minikube
+        if: env.KS_CHANGED == 'true'
         run: |
           echo "=== 1. Freeing up Disk Space ==="
           docker system prune -af --volumes
@@ -47,22 +60,8 @@ jobs:
           df -h
         shell: bash
 
-      # ──────────────────────────────────────────────────────────────────────
-      # 2. BUILD VICTIM APP
-      # ──────────────────────────────────────────────────────────────────────
-      - name: Build Docker image
-        run: |
-          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
-          docker tag ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} ${{ env.IMAGE_NAME }}:latest
-        shell: bash
-
-      - name: Load image into Minikube
-        run: |
-          minikube image load ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          minikube image load ${{ env.IMAGE_NAME }}:latest
-        shell: bash
-
       - name: Configure Minikube context
+        if: env.KS_CHANGED == 'true'
         run: |
           kubectl config use-context minikube
           echo "✓ Minikube context configured"
@@ -72,6 +71,7 @@ jobs:
       # 3. INSTALL FALCO (with Falcosidekick → KubeSentinel runtime webhook)
       # ──────────────────────────────────────────────────────────────────────
       - name: Install and Configure Falco
+        if: env.KS_CHANGED == 'true'
         run: |
           echo "=== Installing Falco via Helm ==="
           helm repo add falcosecurity https://falcosecurity.github.io/charts
@@ -130,6 +130,7 @@ jobs:
       # 4. BUILD & DEPLOY KUBESENTINEL
       # ──────────────────────────────────────────────────────────────────────
       - name: Build and Deploy KubeSentinel Components
+        if: env.KS_CHANGED == 'true'
         run: |
           echo "=== Building KubeSentinel CLI Image ==="
           cd ~/kubesentinel
@@ -165,6 +166,7 @@ jobs:
         shell: bash
 
       - name: Inject secrets into KubeSentinel AI deployment
+        if: env.KS_CHANGED == 'true'
         run: |
           kubectl create secret generic kubesentinel-ai-secrets \
             --from-literal=GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
@@ -232,13 +234,21 @@ jobs:
         shell: bash
 
       - name: Verify AI service health and staging endpoint
+        if: env.KS_CHANGED == 'true'
         run: |
           echo "=== Running smoke test on KubeSentinel AI pod ==="
-          AI_POD=$(kubectl get pod -n kubesentinel -l app=kubesentinel-ai -o jsonpath='{.items[0].metadata.name}')
+
+          # Only select a Running pod, not a Terminating one
+          AI_POD=$(kubectl get pod -n kubesentinel -l app=kubesentinel-ai \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
           if [ -z "$AI_POD" ]; then
-            echo "❌ No AI pod found"
+            echo "❌ No Running AI pod found"
+            kubectl get pods -n kubesentinel -l app=kubesentinel-ai
             exit 1
           fi
+          echo "Using pod: $AI_POD"
 
           PF_LOG=$(mktemp)
           cleanup_port_forward() {
@@ -250,18 +260,47 @@ jobs:
           }
           trap cleanup_port_forward EXIT
 
-          echo "Starting port-forward to KubeSentinel AI pod..."
+          echo "Starting port-forward..."
           kubectl port-forward -n kubesentinel "pod/$AI_POD" 5000:5000 --address 127.0.0.1 >"$PF_LOG" 2>&1 &
           PF_PID=$!
-          sleep 5
+
+          # Wait for port-forward to be ready with retries instead of fixed sleep
+          echo "Waiting for port-forward to establish..."
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:5000/health > /dev/null 2>&1; then
+              echo "✓ Port-forward ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
 
           echo "Checking /health endpoint..."
-          curl -sSf http://127.0.0.1:5000/health || { echo "❌ /health failed"; exit 1; }
+          curl -sSf http://127.0.0.1:5000/health || { echo "❌ /health failed"; cat "$PF_LOG"; exit 1; }
 
           echo "Checking /api/staging endpoint..."
           curl -sSf http://127.0.0.1:5000/api/staging || { echo "❌ /api/staging failed"; exit 1; }
-          
+
           echo "✓ AI service health and staging endpoint verified"
+        shell: bash
+
+      # ──────────────────────────────────────────────────────────────────────
+      # 2. BUILD VICTIM APP
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Remove old victim-app image from Minikube
+        run: |
+          minikube image rm victim-app:latest || true
+        shell: bash
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} ${{ env.IMAGE_NAME }}:latest
+        shell: bash
+
+      - name: Load image into Minikube
+        run: |
+          minikube image load ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          minikube image load ${{ env.IMAGE_NAME }}:latest
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
@@ -671,6 +710,7 @@ jobs:
           echo "Image           : ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           echo "Namespace       : ${{ env.NAMESPACE }}"
           echo "Deployment      : ${{ env.DEPLOYMENT_NAME }}"
+          echo "KS_CHANGED      : ${{ env.KS_CHANGED }}"
           echo "Commit          : ${{ github.sha }}"
           echo "Static scan     : SCAN_FAILED=${{ env.SCAN_FAILED }}"
           echo "CSPM CRITICAL   : ${{ env.CSPM_CRITICAL }}"
