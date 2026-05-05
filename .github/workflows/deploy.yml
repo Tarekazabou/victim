@@ -136,9 +136,15 @@ jobs:
           minikube image load kubesentinel:latest
           echo "✓ KubeSentinel CLI image loaded"
 
+          echo "=== Ensuring kubesentinel namespace exists ==="
+          kubectl create namespace kubesentinel --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "=== Creating hostPath directories on Minikube node ==="
+          minikube ssh "sudo mkdir -p /var/lib/kubesentinel/forensics && \
+            sudo touch /var/lib/kubesentinel/staging.db && \
+            sudo chmod 777 /var/lib/kubesentinel/forensics /var/lib/kubesentinel/staging.db"
+
           echo "=== Applying KubeSentinel DaemonSet ==="
-          # The DaemonSet already includes --metrics-port=8080 in its args,
-          # which exposes the Prometheus /metrics and /health endpoints.
           kubectl apply -f deploy/kubesentinel-daemonset.yaml
           echo "✓ KubeSentinel DaemonSet deployed"
 
@@ -146,6 +152,10 @@ jobs:
           docker build -f dockerfile.ai -t kubesentinel-ai:latest .
           minikube image load kubesentinel-ai:latest
           echo "✓ KubeSentinel AI image loaded"
+
+          echo "=== Applying KubeSentinel AI Deployment ==="
+          kubectl apply -f deploy/kubesentinel-ai-deployment.yaml
+          echo "✓ KubeSentinel AI deployment manifest applied"
         shell: bash
 
       - name: Inject secrets into KubeSentinel AI deployment
@@ -173,13 +183,13 @@ jobs:
         run: |
           echo "=== Restarting KubeSentinel AI Deployment ==="
           kubectl rollout restart deployment kubesentinel-ai -n kubesentinel
-          kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=5m
+          kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=8m
           echo "✓ KubeSentinel AI deployment ready"
 
           echo "=== Configuring Firewall ==="
           sudo ufw allow 30500/tcp || true
           sudo ufw allow 8080/tcp  || true
-          echo "✓ Firewall rules applied (30500 for AI, 8080 for metrics)"
+          echo "✓ Firewall rules applied"
         shell: bash
 
       - name: Verify AI service health and staging endpoint
