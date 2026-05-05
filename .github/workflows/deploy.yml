@@ -39,7 +39,7 @@ jobs:
           minikube delete
 
           echo "=== 3. Starting Minikube safely ==="
-          minikube start --memory=3000 --cpus=2 --force
+          minikube start --memory=2500 --cpus=2 --force
 
           echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
@@ -159,6 +159,9 @@ jobs:
           echo "=== Applying KubeSentinel AI Deployment ==="
           kubectl apply -f deploy/kubesentinel-ai-deployment.yaml
           echo "✓ KubeSentinel AI deployment manifest applied"
+
+          echo "=== Removing resource limits to allow flexible allocation ===" 
+          kubectl patch deployment kubesentinel-ai -n kubesentinel --type='json' -p='[{"op": "remove", "path": "/spec/template/spec/containers/0/resources/limits"}]' 2>/dev/null || echo "⚠️  No limits to remove or already removed"
         shell: bash
 
       - name: Inject secrets into KubeSentinel AI deployment
