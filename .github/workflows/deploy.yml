@@ -240,11 +240,26 @@ jobs:
             exit 1
           fi
 
+          PF_LOG=$(mktemp)
+          cleanup_port_forward() {
+            if [ -n "${PF_PID:-}" ] && kill -0 "$PF_PID" 2>/dev/null; then
+              kill "$PF_PID" 2>/dev/null || true
+              wait "$PF_PID" 2>/dev/null || true
+            fi
+            rm -f "$PF_LOG"
+          }
+          trap cleanup_port_forward EXIT
+
+          echo "Starting port-forward to KubeSentinel AI pod..."
+          kubectl port-forward -n kubesentinel "pod/$AI_POD" 5000:5000 --address 127.0.0.1 >"$PF_LOG" 2>&1 &
+          PF_PID=$!
+          sleep 5
+
           echo "Checking /health endpoint..."
-          kubectl exec "$AI_POD" -n kubesentinel -- curl -sSf http://localhost:5000/health || { echo "❌ /health failed"; exit 1; }
+          curl -sSf http://127.0.0.1:5000/health || { echo "❌ /health failed"; exit 1; }
 
           echo "Checking /api/staging endpoint..."
-          kubectl exec "$AI_POD" -n kubesentinel -- curl -sSf http://localhost:5000/api/staging || { echo "❌ /api/staging failed"; exit 1; }
+          curl -sSf http://127.0.0.1:5000/api/staging || { echo "❌ /api/staging failed"; exit 1; }
           
           echo "✓ AI service health and staging endpoint verified"
         shell: bash
