@@ -271,11 +271,14 @@ jobs:
           kubectl port-forward -n kubesentinel "pod/$AI_POD" 5000:5000 --address 127.0.0.1 >"$PF_LOG" 2>&1 &
           PF_PID=$!
 
+          # Give port-forward time to bind before starting retry loop
+          sleep 10
+
           # Wait for port-forward to be ready with retries instead of fixed sleep
           echo "Waiting for port-forward to establish..."
           for i in $(seq 1 15); do
             if curl -sf http://127.0.0.1:5000/health > /dev/null 2>&1; then
-              echo "✓ Port-forward ready after ${i}s"
+              echo "✓ Port-forward ready after $((i + 2))s"
               break
             fi
             sleep 1
