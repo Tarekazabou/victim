@@ -183,6 +183,16 @@ jobs:
         run: |
           echo "=== Restarting KubeSentinel AI Deployment ==="
           kubectl rollout restart deployment kubesentinel-ai -n kubesentinel
+          echo "=== Clearing any stuck terminating KubeSentinel AI pod ==="
+          STUCK_POD=$(kubectl get pods -n kubesentinel -l app=kubesentinel-ai --no-headers 2>/dev/null | awk '$3=="Terminating" {print $1; exit}')
+
+          if [ -n "$STUCK_POD" ]; then
+            echo "Force deleting stuck pod: $STUCK_POD"
+            kubectl delete pod -n kubesentinel "$STUCK_POD" --force --grace-period=0
+          else
+            echo "No stuck terminating KubeSentinel AI pod found"
+          fi
+
           kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=8m
           echo "✓ KubeSentinel AI deployment ready"
 
@@ -190,6 +200,8 @@ jobs:
           sudo ufw allow 30500/tcp || true
           sudo ufw allow 8080/tcp  || true
           echo "✓ Firewall rules applied"
+          echo "kubesentinel AI pod status:"
+          kubectl get pods -n kubesentinel -l app=kubesentinel-ai
         shell: bash
 
       - name: Verify AI service health and staging endpoint
