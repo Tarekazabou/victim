@@ -185,7 +185,41 @@ jobs:
             -n kubesentinel
 
           echo "=== Waiting for rollout triggered by env injection ==="
-          kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=8m
+          if ! kubectl rollout status deployment/kubesentinel-ai -n kubesentinel --timeout=8m; then
+            echo "❌ kubesentinel-ai rollout failed. Dumping diagnostics..."
+
+            echo "--- Deployments / ReplicaSets / Pods ---"
+            kubectl get deploy,rs,pods -n kubesentinel -o wide || true
+
+            echo "--- Describe Deployment ---"
+            kubectl describe deployment kubesentinel-ai -n kubesentinel || true
+
+            echo "--- Describe ReplicaSets ---"
+            kubectl describe rs -n kubesentinel || true
+
+            echo "--- Namespace Events (newest last) ---"
+            kubectl get events -n kubesentinel --sort-by=.lastTimestamp | tail -n 80 || true
+
+            POD=$(kubectl get pod -n kubesentinel -l app=kubesentinel-ai \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "$POD" ]; then
+              echo "--- Describe Pod: $POD ---"
+              kubectl describe pod -n kubesentinel "$POD" || true
+
+              echo "--- Pod logs (current, last 200 lines) ---"
+              kubectl logs -n kubesentinel "$POD" --all-containers --tail=200 || true
+
+              echo "--- Pod logs (previous container, if any) ---"
+              kubectl logs -n kubesentinel "$POD" --all-containers --previous --tail=200 || true
+            else
+              echo "⚠️  No pod found with label app=kubesentinel-ai"
+            fi
+
+            echo "--- Image presence on Minikube node ---"
+            minikube ssh "docker images | grep kubesentinel-ai" || true
+
+            exit 1
+          fi
           echo "✓ KubeSentinel AI deployment ready"
 
           echo "=== Configuring Firewall ==="
