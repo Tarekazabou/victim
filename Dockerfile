@@ -1,5 +1,5 @@
-# Use full node:18 image (not slim/alpine) so standard Linux utilities are available
-FROM node:18
+# Use a slimmer Node base image to reduce image size
+FROM node:18-slim
 
 WORKDIR /app
 

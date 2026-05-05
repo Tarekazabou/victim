@@ -3,7 +3,8 @@ const { exec } = require('child_process');
 const fs = require('fs');
 
 const app = express();
-const PORT = 3000;
+const DEFAULT_PORT = Number.parseInt(process.env.PORT, 10) || 3000;
+const MAX_PORT_RETRIES = 20;
 
 // Serve the frontend HTML
 app.get('/', (req, res) => {
@@ -291,6 +292,22 @@ app.get('/api/read', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Victim app listening on port ${PORT}`);
-});
+function startServer(port, retriesLeft) {
+  const server = app.listen(port, () => {
+    console.log(`Victim app listening on port ${port}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && retriesLeft > 0) {
+      const nextPort = port + 1;
+      console.warn(`Port ${port} is busy, retrying on ${nextPort}...`);
+      startServer(nextPort, retriesLeft - 1);
+      return;
+    }
+
+    console.error('Server failed to start:', err.message);
+    process.exit(1);
+  });
+}
+
+startServer(DEFAULT_PORT, MAX_PORT_RETRIES);

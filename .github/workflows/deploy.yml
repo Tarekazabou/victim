@@ -210,6 +210,11 @@ jobs:
           fi
         shell: bash
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # NEW: Python CSPM module scan (cspm/ directory, added in Phase 1.4)
       - name: Run CSPM Python Scan
         run: |
@@ -218,14 +223,14 @@ jobs:
           KUBESENTINEL_DIR=/home/test/kubesentinel
 
           # Install CSPM dependency (pyyaml only, lightweight)
-          pip install pyyaml --break-system-packages -q 2>/dev/null || \
-          pip install pyyaml -q 2>/dev/null || true
+            python3 -m pip install pyyaml --break-system-packages -q 2>/dev/null || \
+            python3 -m pip install pyyaml -q 2>/dev/null || true
 
           cd "$KUBESENTINEL_DIR"
 
           # JSON findings — machine-readable, used for violation check below
           set +e
-          python -m cspm.cli \
+            python3 -m cspm.cli \
             --manifest "$REPO_WORKSPACE/k8s/" \
             --format json \
             --output "$REPO_WORKSPACE/reports/cspm-findings.json" \
@@ -234,7 +239,7 @@ jobs:
           set -e
 
           # HTML report — visual dashboard uploaded as artifact
-          python -m cspm.cli \
+            python3 -m cspm.cli \
             --manifest "$REPO_WORKSPACE/k8s/" \
             --format html \
             --output "$REPO_WORKSPACE/reports/cspm-report.html" || true
@@ -243,38 +248,38 @@ jobs:
           if [ -f "$REPO_WORKSPACE/reports/cspm-findings.json" ]; then
             # Print severity counts from JSON summary block
             python3 -c "
-          import json, sys
-          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
-          data = json.load(f)
-          summary = data.get('summary', {})
-          total = summary.get('total', 0)
-          print(f'Total findings : {total}')
-          for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
-              count = summary.get(sev, 0)
-              if count:
+              import json
+              with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+                data = json.load(f)
+              summary = data.get('summary', {})
+              total = summary.get('total', 0)
+              print(f'Total findings : {total}')
+              for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
+                count = summary.get(sev, 0)
+                if count:
                   print(f'  {sev}: {count}')
-          if total == 0:
-              print('✓ No CSPM findings — manifests look clean')
-          else:
-              print('⚠️  Review cspm-report.html for remediation guidance')
-          " 2>/dev/null || cat "$REPO_WORKSPACE/reports/cspm-findings.json"
+              if total == 0:
+                print('No CSPM findings - manifests look clean')
+              else:
+                print('Review cspm-report.html for remediation guidance')
+              " 2>/dev/null || cat "$REPO_WORKSPACE/reports/cspm-findings.json"
 
-                      # Set env flag if CRITICAL findings exist
-                      CRITICAL_COUNT=$(python3 -c "
-          import json
-          with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
-              data = json.load(f)
-          print(data.get('summary', {}).get('CRITICAL', 0))
-          " 2>/dev/null || echo "0")
+                    # Set env flag if CRITICAL findings exist
+                    CRITICAL_COUNT=$(python3 -c "
+                  import json
+                  with open('$REPO_WORKSPACE/reports/cspm-findings.json') as f:
+                      data = json.load(f)
+                  print(data.get('summary', {}).get('CRITICAL', 0))
+                  " 2>/dev/null || echo "0")
 
-            echo "CSPM_CRITICAL=$CRITICAL_COUNT" >> $GITHUB_ENV
+                    echo "CSPM_CRITICAL=$CRITICAL_COUNT" >> $GITHUB_ENV
 
-            if [ "$CRITICAL_COUNT" -gt 0 ]; then
-              echo "⚠️  CSPM found $CRITICAL_COUNT CRITICAL misconfiguration(s) — review before production"
-            fi
-          else
-            echo "⚠️  CSPM output file not found (check cspm module installation)"
-          fi
+                    if [ "$CRITICAL_COUNT" -gt 0 ]; then
+                      echo "⚠️  CSPM found $CRITICAL_COUNT CRITICAL misconfiguration(s) — review before production"
+                    fi
+                  else
+                    echo "⚠️  CSPM output file not found (check cspm module installation)"
+                  fi
         shell: bash
 
       # ──────────────────────────────────────────────────────────────────────
