@@ -39,7 +39,7 @@ jobs:
           minikube delete
 
           echo "=== 3. Starting Minikube safely ==="
-          minikube start --memory=3500 --cpus=2 --force
+          minikube start --memory=3000 --cpus=2 --force
 
           echo "=== 4. Wait for Control Plane ==="
           kubectl wait --for=condition=Ready node/minikube --timeout=90s
@@ -118,7 +118,10 @@ jobs:
           if kubectl logs -n falco "$FALCO_POD" --tail=10 | grep -q '"time"'; then
             echo "✓ Falco is outputting JSON events"
           else
-            echo "⚠️  Falco logs (first 20 lines):"
+            echo "⚠️  Falco JSON output not detected. Debugging config:"
+            echo "--- Checking falco.yaml inside pod ---"
+            kubectl exec -n falco "$FALCO_POD" -- grep -A 2 'json_output' /etc/falco/falco.yaml || echo "(grep failed)"
+            echo "--- Recent Falco logs ---"
             kubectl logs -n falco "$FALCO_POD" --tail=20 || true
           fi
         shell: bash
