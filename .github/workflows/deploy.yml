@@ -150,10 +150,21 @@ jobs:
           echo "=== Ensuring kubesentinel namespace exists ==="
           kubectl create namespace kubesentinel --dry-run=client -o yaml | kubectl apply -f -
 
-          echo "=== Setup host mount ==="
-          sudo mkdir -p /var/lib/kubesentinel/forensics
-          sudo chmod 777 /var/lib/kubesentinel
-          minikube mount /var/lib/kubesentinel:/var/lib/kubesentinel &
+          # Set password once to avoid repeating secrets
+          PASSWORD="${{ secrets.SUDO_PASSWORD }}"
+          echo "$PASSWORD" 
+          if [ -z "$PASSWORD" ]; then
+            echo "ERROR: SUDO_PASSWORD secret is empty or not set"
+            exit 1
+          fi
+
+          # Use -S with every sudo command
+          echo "$PASSWORD" | sudo -S mkdir -p /var/lib/kubesentinel/forensics
+          echo "$PASSWORD" | sudo -S chmod 777 /var/lib/kubesentinel
+
+          # minikube mount may also need sudo; try to pass the password via environment
+          # or run the whole script under a sudo session
+          echo "$PASSWORD" | sudo -S minikube mount /var/lib/kubesentinel:/var/lib/kubesentinel &
           sleep 3
 
           echo "=== Applying KubeSentinel DaemonSet ==="
@@ -588,7 +599,6 @@ jobs:
           echo "  (no manual log piping needed)"
           echo ""
           echo "  Optional manual pipe (debug only):"
-          echo "  export TRAINING_API_TOKEN=\$(kubectl get secret kubesentinel-ai-secrets -n kubesentinel -o jsonpath='{.data.TRAINING_API_TOKEN}' | base64 -d)"
           echo "  kubectl logs -f -n falco $FALCO_POD \\"
           echo "    | grep --line-buffered '^{' \\"
           echo "    | ./bin/kubesentinel monitor-stdin --config=config.yaml --warmup-minutes=0"
