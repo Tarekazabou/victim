@@ -150,10 +150,11 @@ jobs:
           echo "=== Ensuring kubesentinel namespace exists ==="
           kubectl create namespace kubesentinel --dry-run=client -o yaml | kubectl apply -f -
 
-          echo "=== Creating hostPath directories on Minikube node ==="
-          minikube ssh "sudo mkdir -p /var/lib/kubesentinel/forensics && \
-            sudo touch /var/lib/kubesentinel/staging.db && \
-            sudo chmod 777 /var/lib/kubesentinel/forensics /var/lib/kubesentinel/staging.db"
+          echo "=== Setup host mount ==="
+          sudo mkdir -p /var/lib/kubesentinel/forensics
+          sudo chmod 777 /var/lib/kubesentinel
+          minikube mount /var/lib/kubesentinel:/var/lib/kubesentinel &
+          sleep 3
 
           echo "=== Applying KubeSentinel DaemonSet ==="
           kubectl apply -f deploy/kubesentinel-daemonset.yaml
@@ -587,6 +588,7 @@ jobs:
           echo "  (no manual log piping needed)"
           echo ""
           echo "  Optional manual pipe (debug only):"
+          echo "  export TRAINING_API_TOKEN=\$(kubectl get secret kubesentinel-ai-secrets -n kubesentinel -o jsonpath='{.data.TRAINING_API_TOKEN}' | base64 -d)"
           echo "  kubectl logs -f -n falco $FALCO_POD \\"
           echo "    | grep --line-buffered '^{' \\"
           echo "    | ./bin/kubesentinel monitor-stdin --config=config.yaml --warmup-minutes=0"
